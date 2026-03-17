@@ -1,7 +1,17 @@
 import pandas as pd
 import os
+import re
 
-def clean_tlc_data(file_url: str, output_path: str):
+
+def _extract_expected_month(file_url: str) -> str:
+    """Extrae YYYY-MM desde la URL del archivo TLC."""
+    match = re.search(r"(\d{4}-\d{2})\.parquet", file_url)
+    if not match:
+        raise ValueError(f"No se pudo inferir el mes esperado desde la URL: {file_url}")
+    return match.group(1)
+
+
+def clean_tlc_data(file_url: str, output_path: str, expected_month: str | None = None):
     print(f"Descargando y leyendo datos de: {file_url}...")
     df = pd.read_parquet(file_url)
     
@@ -33,6 +43,16 @@ def clean_tlc_data(file_url: str, output_path: str):
     duracion = df['tpep_dropoff_datetime'] - df['tpep_pickup_datetime']
     duracion_minutos = duracion.dt.total_seconds() / 60
     df = df[(duracion_minutos >= 1) & (duracion_minutos <= 600)]
+
+    # Validación de rango mensual del viaje:
+    # el pickup debe caer dentro del mes esperado.
+    month_str = expected_month or _extract_expected_month(file_url)
+    month_start = pd.Timestamp(f"{month_str}-01")
+    next_month_start = month_start + pd.offsets.MonthBegin(1)
+    df = df[
+        (df['tpep_pickup_datetime'] >= month_start)
+        & (df['tpep_pickup_datetime'] < next_month_start)
+    ]
     
     print(f"Registros después de limpieza: {len(df)}")
     

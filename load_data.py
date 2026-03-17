@@ -1,5 +1,5 @@
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, inspect
 import time
 from io import StringIO
 import os
@@ -8,7 +8,24 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
-def load_data_to_postgres(file_path: str, db_url: str):
+def create_fact_indexes(engine) -> None:
+    """Crea índices de fact_trips sin fallar si ya existen."""
+    with engine.connect() as conn:
+        print("Creando índices...")
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_payment_type ON fact_trips(payment_type_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_ratecode ON fact_trips(ratecode_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_pickup_time ON fact_trips(tpep_pickup_datetime)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_pickup_location ON fact_trips(pulocationid)"))
+        conn.commit()
+
+
+def load_data_to_postgres(
+    file_path: str,
+    db_url: str,
+    if_exists: str = 'replace',
+    create_dimensions: bool = True,
+    create_indexes: bool = True,
+):
     total_start = time.time()
     print(f"Leyendo datos limpios de {file_path}...")
     df = pd.read_parquet(file_path)
@@ -16,8 +33,8 @@ def load_data_to_postgres(file_path: str, db_url: str):
     
     # Crear conexión a la base de datos
     engine = create_engine(db_url)
-    
-    print("Conexión a base de datos establecida. Creando dimensiones...")
+
+    print("Conexión a base de datos establecida.")
     
     # --- MODELADO: DIMENSIONES ---
     # 1. Dimensión de Tipo de Pago (Payment Type)
@@ -35,9 +52,11 @@ def load_data_to_postgres(file_path: str, db_url: str):
     })
     
     # --- CARGA DE DIMENSIONES ---
-    dim_payment.to_sql('dim_payment_type', con=engine, if_exists='replace', index=False)
-    dim_ratecode.to_sql('dim_ratecode', con=engine, if_exists='replace', index=False)
-    print("Tablas de dimensiones cargadas exitosamente.")
+    if create_dimensions:
+        print("Creando dimensiones...")
+        dim_payment.to_sql('dim_payment_type', con=engine, if_exists='replace', index=False)
+        dim_ratecode.to_sql('dim_ratecode', con=engine, if_exists='replace', index=False)
+        print("Tablas de dimensiones cargadas exitosamente.")
 
     # --- MODELADO: TABLA DE HECHOS (FACT TABLE) ---
     # Seleccionamos las columnas relevantes para la tabla de hechos
@@ -58,8 +77,14 @@ def load_data_to_postgres(file_path: str, db_url: str):
     print(f"Iniciando carga de la tabla de hechos (fact_trips) con {len(fact_trips)} registros...")
     load_start = time.time()
 
-    # Crear tabla vacía con esquema correcto (sin cargar datos todavía)
-    fact_trips.head(0).to_sql(name='fact_trips', con=engine, if_exists='replace', index=False)
+    inspector = inspect(engine)
+    fact_table_exists = inspector.has_table('fact_trips')
+
+    if if_exists == 'replace' or not fact_table_exists:
+        # Crear/recrear tabla vacía con esquema correcto (sin cargar datos todavía)
+        fact_trips.head(0).to_sql(name='fact_trips', con=engine, if_exists='replace', index=False)
+    elif if_exists != 'append':
+        raise ValueError("if_exists debe ser 'replace' o 'append'.")
 
     # COPY es mucho más rápido que INSERT para millones de filas.
     chunksize = 250000
@@ -107,14 +132,8 @@ def load_data_to_postgres(file_path: str, db_url: str):
     finally:
         raw_conn.close()
     
-    # Crear índices para mejorar rendimiento de queries
-    with engine.connect() as conn:
-        print("Creando índices...")
-        conn.execute(text("CREATE INDEX idx_payment_type ON fact_trips(payment_type_id)"))
-        conn.execute(text("CREATE INDEX idx_ratecode ON fact_trips(ratecode_id)"))
-        conn.execute(text("CREATE INDEX idx_pickup_time ON fact_trips(tpep_pickup_datetime)"))
-        conn.execute(text("CREATE INDEX idx_pickup_location ON fact_trips(pulocationid)"))
-        conn.commit()
+    if create_indexes:
+        create_fact_indexes(engine)
     
     end_time = time.time()
     load_elapsed = round(end_time - load_start, 2)
